@@ -1,0 +1,7 @@
+# dsh-session-purge bundle layer: inserts the plugin row into a profile stack.
+# Loaded when a profile lists `dsh-session-purge` in its bundles (or by hand
+# through this patch). The row id stays stable so later profile patches can
+# target it.
+- insert:
+    - id: session-purge
+      name: 'dsh-session-purge'

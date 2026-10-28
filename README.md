@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 社区第三方插件，与 DeepSeek 官方无隶属关系；触点均为 Harness 内部实现面（非文档化 API）。
-> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.1-rc.3**（Windows x64，nightly 渠道，2026-10-26 逐触点审计）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 28/28）。
+> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.1-rc.3**（Windows x64，nightly 渠道，2026-10-26 逐触点审计）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 33/33）。
 
 > [!WARNING]
 > **删除即永久，无回收站**；脱敏只改写本地日志文件，**不能替代密钥轮换**。
@@ -51,6 +51,7 @@ ctx.emit('api-session/removed')                  → 通知全部客户端刷新
 ```
 
 - 顺序：先删日志并验证删净，再清记账（半删会话不会掉出分组）；清理后逐层事后验证，未净显式报错，可直接重试；
+- 工作区记录另走 harness 的 `workspaceRegistry.delete()`（pendingMutation 协议，进程在删除过程中退出也能在下次启动收尾）；无该服务时降级路径写同样的标记，记录删除失败会回滚 order；
 - 护栏：会话 id 须匹配 `session-<uuid>`（或裸 uuid，不区分大小写）；**运行中拒绝（409）**；级联深度上限 `MAX_CASCADE_DEPTH = 8`，超出以 `cascadeTruncated: true` 显式报告；仅驻留不拒绝（先 `flush` 再清盘）；路径必须落在预期根内；**符号链接一律拒删**；全走 Node `fs`，不经 shell；
 - TEMP 清扫按**内容归因**（目录内容提及会话 id 才删），受文件数/字节预算约束（超限报 `budgetHit`）；整棵级联只扫一次，各会话 `tempSweep[].dirs` 之和可能大于实际删除数（客户端摘要用去重合计 `tempSweepTotal`）。
 
@@ -93,7 +94,7 @@ POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? }
 node --test test/purge.test.mjs
 ```
 
-当前 **28/28**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
+当前 **33/33**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
 
 ## 已知限制（如实）
 

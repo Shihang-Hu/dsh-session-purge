@@ -72,13 +72,16 @@ function makeStorageDomain({ projRows = [], workspaces = {}, archived = [], pinn
   const wsTable = new Map(Object.entries(workspaces).map(([id, record]) => [id, { ...record }]))
   const putCalls = []
   const wsDeleteCalls = []
+  const globalSets = []
   let globalState = { archivedSessionIds: [...archived], pinnedSessionIds: [...pinned], workspaceIds: [...workspaceIds] }
   return {
     putCalls,
     wsDeleteCalls,
+    globalSets,
     projTable,
     wsTable,
     globalState: () => globalState,
+    setGlobal: (value) => { globalState = value },
     get(name) {
       if (name === 'session_projcache') {
         return {
@@ -99,7 +102,7 @@ function makeStorageDomain({ projRows = [], workspaces = {}, archived = [], pinn
           }),
           global: {
             get: () => globalState,
-            set: async (value) => { globalState = value },
+            set: async (value) => { globalSets.push(value); globalState = value },
           },
         }
       }
@@ -254,6 +257,42 @@ test('pinnedSessionIds are cleaned in both accounting paths', async () => {
   const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
   assert.deepEqual(registry.global.pinnedSessionIds, [PARENT])
   assert.deepEqual(registry.tables.workspaces.ws1.sessionIds, [])
+})
+
+test('archive and pin refs are rolled through the workspace registry', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: {
+      global: { archivedSessionIds: [LONE], pinnedSessionIds: [LONE] },
+      tables: { workspaces: { ws1: { sessionIds: [LONE] } } },
+    },
+  })
+  const storageDomain = makeStorageDomain({
+    workspaces: { ws1: { sessionIds: [LONE] } },
+    archived: [LONE],
+    pinned: [LONE],
+  })
+  const calls = []
+  const workspaceRegistry = {
+    unarchiveSession: async (id) => {
+      calls.push(['unarchive', id])
+      const state = storageDomain.globalState()
+      storageDomain.setGlobal({ ...state, archivedSessionIds: state.archivedSessionIds.filter((entry) => entry !== id) })
+    },
+    unpinSession: async (id) => {
+      calls.push(['unpin', id])
+      const state = storageDomain.globalState()
+      storageDomain.setGlobal({ ...state, pinnedSessionIds: state.pinnedSessionIds.filter((entry) => entry !== id) })
+    },
+  }
+  const ctx = makeCtx({ ...makeGraph([{ id: LONE, origin: 'human' }]), storageDomain, workspaceRegistry })
+
+  await core.purgeTree(ctx, HOME, LONE)
+
+  assert.deepEqual(calls, [['unarchive', LONE], ['unpin', LONE]])
+  assert.deepEqual(storageDomain.globalState().archivedSessionIds, [])
+  assert.deepEqual(storageDomain.globalState().pinnedSessionIds, [])
+  assert.deepEqual(storageDomain.globalSets, [], 'the direct fallback must not write when the registry handled both lists')
 })
 
 test('a resident (previously opened) session is flushed and deleted, not refused', async () => {
@@ -752,6 +791,11 @@ test('purgeWorkspace deletes every member session and the workspace record', asy
   // the order list must lose the deleted id in BOTH layers — a leftover entry
   // fails the harness registry's startup validation (2026-10-15 incident)
   assert.deepEqual(storageDomain.globalState().workspaceIds, ['ws2'])
+  assert.ok(
+    storageDomain.globalSets.some((state) => state.pendingMutation?.operation === 'delete' && state.pendingMutation.workspaceId === 'ws1'),
+    'the fallback must persist the harness pending-mutation marker before deleting the record',
+  )
+  assert.equal(storageDomain.globalState().pendingMutation, undefined, 'the marker must be cleared once the record is gone')
   assert.equal(storageDomain.projTable.size, 0)
   assert.equal(await exists(sessionDir(PARENT)), false)
   assert.equal(await exists(sessionDir(CHILD_A)), false)
@@ -766,6 +810,63 @@ test('purgeWorkspace deletes every member session and the workspace record', asy
     assert.notEqual(registry.tables.workspaces[id], undefined)
     assert.notEqual(storageDomain.wsTable.get(id), undefined)
   }
+})
+
+test('purgeWorkspace prefers the transactional workspace registry', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: {
+      global: { archivedSessionIds: [], pinnedSessionIds: [], workspaceIds: ['ws1', 'ws2'] },
+      tables: { workspaces: { ws1: { title: '事务工作区', sessionIds: [] }, ws2: { title: '保留', sessionIds: [] } } },
+    },
+  })
+  const storageDomain = makeStorageDomain({
+    workspaces: { ws1: { title: '事务工作区', sessionIds: [] }, ws2: { title: '保留', sessionIds: [] } },
+    workspaceIds: ['ws1', 'ws2'],
+  })
+  const registryCalls = []
+  const workspaceRegistry = {
+    delete: async (id) => {
+      registryCalls.push(id)
+      if (!storageDomain.wsTable.has(id)) return false
+      storageDomain.wsTable.delete(id)
+      const state = storageDomain.globalState()
+      storageDomain.setGlobal({ ...state, workspaceIds: state.workspaceIds.filter((workspaceId) => workspaceId !== id) })
+      return true
+    },
+  }
+  const ctx = makeCtx({ ...makeGraph([]), storageDomain, workspaceRegistry })
+
+  const report = await core.purgeWorkspace(ctx, HOME, 'ws1')
+
+  assert.deepEqual(registryCalls, ['ws1'], 'the registry delete must be the live-domain path')
+  assert.deepEqual(storageDomain.wsDeleteCalls, [], 'the two-write fallback must not run when the registry handled it')
+  assert.deepEqual(storageDomain.globalSets, [], 'the fallback must not write the order list itself')
+  assert.equal(report.workspaceRecordDeleted, true)
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.equal(registry.tables.workspaces.ws1, undefined)
+  assert.deepEqual(registry.global.workspaceIds, ['ws2'])
+})
+
+test('a failing workspace registry delete does not fall back to direct writes', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: { global: { workspaceIds: ['ws1'] }, tables: { workspaces: { ws1: { title: '保留', sessionIds: [] } } } },
+  })
+  const storageDomain = makeStorageDomain({
+    workspaces: { ws1: { title: '保留', sessionIds: [] } },
+    workspaceIds: ['ws1'],
+  })
+  const workspaceRegistry = { delete: async () => { throw new Error('registry busy') } }
+  const ctx = makeCtx({ ...makeGraph([]), storageDomain, workspaceRegistry })
+
+  await assert.rejects(() => core.purgeWorkspace(ctx, HOME, 'ws1'), /registry busy/)
+
+  assert.deepEqual(storageDomain.wsDeleteCalls, [], 'the fallback must not race a failed registry delete')
+  assert.deepEqual(storageDomain.globalSets, [], 'the fallback must not touch the order list')
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.notEqual(registry.tables.workspaces.ws1, undefined)
+  assert.deepEqual(registry.global.workspaceIds, ['ws1'])
 })
 
 test('purgeWorkspace refuses up front while a member session is running', async () => {
@@ -837,6 +938,39 @@ test('purgeWorkspace deletes an empty workspace through the file fallback', asyn
   const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
   assert.equal(registry.tables.workspaces.ws1, undefined)
   assert.deepEqual(registry.global.workspaceIds, [], 'the order list must not keep a dangling id')
+})
+
+test('a failed fallback record delete rolls the order entry back', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: { global: { archivedSessionIds: [], pinnedSessionIds: [], workspaceIds: ['ws1'] }, tables: { workspaces: { ws1: { title: '保留', sessionIds: [] } } } },
+  })
+  const storageDomain = makeStorageDomain({
+    workspaces: { ws1: { title: '保留', sessionIds: [] } },
+    workspaceIds: ['ws1'],
+  })
+  storageDomain.wsTable.delete = () => { throw new Error('disk full') }
+  const ctx = makeCtx({ ...makeGraph([]), storageDomain })
+
+  await assert.rejects(() => core.purgeWorkspace(ctx, HOME, 'ws1'), /工作区记录（域）删除失败：disk full/)
+
+  assert.deepEqual(storageDomain.globalState().workspaceIds, ['ws1'], 'the filtered order must be rolled back with the record')
+  assert.equal(storageDomain.globalState().pendingMutation, undefined, 'the rollback clears the pending marker as well')
+  assert.equal(storageDomain.wsTable.has('ws1'), true)
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.notEqual(registry.tables.workspaces.ws1, undefined, 'the file must not diverge from the domain')
+  assert.deepEqual(registry.global.workspaceIds, ['ws1'])
+})
+
+test('an unreadable workspace registry is reported, not treated as absent', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: { global: { workspaceIds: ['ws1'] }, tables: { workspaces: { ws1: { title: '损坏', sessionIds: [] } } } },
+  })
+  await writeFile(join(HOME, 'storages', 'workspace.json'), '{not json')
+  const ctx = makeCtx({ ...makeGraph([]) })
+
+  await assert.rejects(() => core.purgeWorkspace(ctx, HOME, 'ws1'), /工作区注册表无法解析/)
 })
 
 test('purgeWorkspace rejects a malformed workspace id', async () => {

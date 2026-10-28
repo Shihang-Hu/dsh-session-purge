@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 > [!IMPORTANT]
 > Community third-party plugin, not affiliated with DeepSeek. All touchpoints are internal Harness implementation surfaces (undocumented API).
-> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.1-rc.3** (Windows x64, nightly channel; touchpoint audit 2026-10-26). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 28/28).
+> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.1-rc.3** (Windows x64, nightly channel; touchpoint audit 2026-10-26). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 33/33).
 
 > [!WARNING]
 > **Deletion is permanent; there is no recycle bin.** Redaction only rewrites local log files and is **not a substitute for key rotation**.
@@ -51,6 +51,7 @@ ctx.emit('api-session/removed')                  → notify all clients to refre
 ```
 
 - Ordering: logs are deleted and verified first, then the accounting (a half-deleted session never falls out of its group); post-verification per layer — anything not cleaned reports an explicit error and can be retried directly;
+- Workspace records go through the harness's `workspaceRegistry.delete()` (pendingMutation protocol: a process that exits mid-delete is completed at next startup); without that service the fallback writes the same marker and rolls the order back when the record write fails;
 - Guardrails: session id must match `session-<uuid>` (bare uuid accepted, case-insensitive); **running sessions refuse (409)**; cascade depth cap `MAX_CASCADE_DEPTH = 8`, reported as `cascadeTruncated: true`; resident sessions are allowed (flushed first); paths must stay inside the expected roots; **symlinks always refused**; Node `fs` only, never a shell;
 - The TEMP sweep is **content-attributed** (only directories whose content mentions the id are deleted), bounded by a file-count/byte budget (`budgetHit`); one sweep per cascade, so per-session `tempSweep[].dirs` can sum to more than actually deleted (the client summary uses the deduplicated `tempSweepTotal`).
 
@@ -93,7 +94,7 @@ Clone or download this repository (no npm dependencies), then **choose exactly o
 node --test test/purge.test.mjs
 ```
 
-Currently **28/28** (Node 24.21; runtimes without zstd skip the redaction cases).
+Currently **33/33** (Node 24.21; runtimes without zstd skip the redaction cases).
 
 ## Known limitations (stated as-is)
 

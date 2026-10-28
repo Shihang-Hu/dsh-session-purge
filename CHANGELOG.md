@@ -2,6 +2,59 @@
 
 > 本记录自 0.3.4 起维护；更早版本的变更未录入。
 
+## 0.5.9 — 工作区删除改为事务式，修复 workspace.json 悬空 ID
+
+2026-10-29：删除工作区后立刻关闭 Harness，`workspace.json` 可能留下
+`global.workspaceIds` 指向已删除记录的状态；下次启动时工作区注册表校验
+（`registry order references missing workspace`）失败，侧边栏里所有工作区
+都不再显示，且没有 pendingMutation 可供恢复。
+
+### 修复
+
+- **优先调用 `workspaceRegistry.delete()`**：记录与 order 列表的两次写盘由
+  harness 自己的 pendingMutation 协议完成；进程在任意一步退出，都会由下次启动的
+  `recoverPendingMutation()` 收尾。插件不再在服务可用时直接分两步写域。
+- **无 workspace 服务的降级路径也写 pendingMutation 标记**：先用一次
+  `global.set` 同时过滤 order 并落 `{ operation: 'delete', workspaceId }`，
+  再删记录、清标记，与 `deleteKnown` 的恢复语义一致；任一步崩溃都可恢复。
+- **注册表删除失败时不叠加直写**：直接返回问题让用户重试，避免与 registry 的
+  回滚/恢复流程竞争。
+
+### 归因补充（定稿时对照 harness 源码）
+
+直写域不仅存在"两次写盘之间退出"的窗口，还会绕开 registry 的内存快照：
+`WorkspaceRegistry` 只在自身写路径更新 `state`/`entities`，并不监听
+`domain/changed`。因此即使不立刻关闭，之后任一次 registry 操作（新建/重排/
+置顶/归档）都可能把旧 order 写回磁盘。`registry.delete()` 同时消除这两条路径；
+原记录里的"立刻关闭"是观察到的触发方式，不是唯一方式。
+
+### 同轮加固
+
+- **归档/置顶集合改走 registry**：会话删除清理这两份全局集合时，优先调用
+  `unarchiveSession()` / `unpinSession()`（两者都是纯移除、不检查会话存在性），
+  避免 registry 内存态在之后一次置顶/归档写回已清理的 id；registry 不认识或
+  不存在的条目仍由随后的直写兜底，无该服务时行为与之前一致。
+- **降级路径记录写失败即回滚**：`table.delete` 抛错时把 order + pending 标记
+  恢复为写前状态（与 `deleteKnown` 一致），不再留下"本次报错、下次启动静默完成
+  删除"的中间态；仅当回滚本身失败时保留标记，交由启动恢复。
+- **损坏的注册表显式上报**：`workspace.json` 存在但无法解析时，工作区删除与
+  会话记账校验都报"工作区注册表无法解析"，不再把它当作"没有注册表"而静默通过。
+- **记录删除失败时不再改写文件**：域层仍持有该记录时跳过文件层，避免把分叉从
+  域搬到文件。
+
+### 清理（无行为变化）
+
+- **`deleteWorkspaceRecord` 拆分**：主流程只负责顺序，具体动作落在
+  `deleteWorkspaceInDomain` / `verifyWorkspaceDomain` / `scrubWorkspaceFile`
+  三个小函数；`verifyWorkspaceDomain` 额外返回 `present`，供"域未删净就不动文件"
+  判断。
+- **`readWorkspaceRegistry` 统一返回 `{ state, error }`**：ENOENT 视为合法缺席，
+  其余读取/解析失败带出 `error`，由调用方决定上报还是忽略。
+- 测试新增 4 条：registry 删除失败不回落、归档/置顶走 registry、降级路径回滚、
+  损坏注册表显式上报。
+
+宿主回归 **33/33**；`package.json` 升版 0.5.9。
+
 ## 0.5.8 — DSH 0.2.1-rc.2 兼容性核查；陈旧 manifest 引用清理
 
 针对 2026-10-17 的新版 DSH（`@deepseek-ai/dsh-desktop@0.2.1-rc.2`，asar 18309 项）把插件的

@@ -2,6 +2,35 @@
 
 > 本记录自 0.3.4 起维护；更早版本的变更未录入。
 
+## 0.5.10 — 适配 rc.5 存储格式：注册表改写加 unit 版本头守卫
+
+2026-10-30：DSH 升至 `0.2.1-rc.5`。整个单元的 JSON 存储文档从此带
+`unit: { name, version }` 版本头，宿主 `parse()` 在域打开时对缺头、异头、
+版本不符一律抛错——一份被改写坏的 `workspace.json` 会让工作区域打不开。
+本插件不改写文档结构（读什么写什么），此前只是"碰巧"把头原样带回；本轮把
+这一点变成显式契约。
+
+### 变更
+
+- **`writeWorkspaceRegistry` 加改写守卫**：`unit` 头存在但不是
+  `{ name: 'workspace', version: <数字> }`，或文档既无 `global` 槽也无
+  `workspaces` 表时，拒绝写回并上报"工作区注册表拒绝改写：<原因>"；
+  会话路径并入 `verifyAccountingClean` 的问题列表，工作区路径并入
+  `scrubWorkspaceFile` 的问题列表，幸存引用照旧可重试。
+- **无头文档保持可写**：无 `unit` 头是 rc.4 及更早的旧格式。宿主先于任何
+  清理操作打开域，能跑着的进程已接受磁盘上的现状，原样编辑不会写出宿主
+  拒绝的形状；rc.5 及以后的有效头则原样保留、永不改写。
+- **对 rc.5 其余触点复核无兼容性问题**：`deleteKnown` 的 pendingMutation
+  协议、`unarchiveSession`/`unpinSession`、`global.set` 持久化先行、会话
+  目录布局（内部文件升为 `session.v4.jsonl.zstd`，删除按整目录进行）、
+  `session_projcache` 目录化（删除/校验路径不变）均与 0.5.9 假设一致；
+  新增全局字段由既有展开写法自然保留。
+
+### 测试
+
+- 新增 2 例：异头文档拒绝改写且原文保留；rc.5 版本头在改写后原样往返。
+- 宿主回归 **35/35**；`package.json` 升版 0.5.10。
+
 ## 0.5.9 — 工作区删除改为事务式，修复 workspace.json 悬空 ID
 
 2026-10-29：删除工作区后立刻关闭 Harness，`workspace.json` 可能留下

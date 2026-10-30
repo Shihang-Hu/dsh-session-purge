@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 社区第三方插件，与 DeepSeek 官方无隶属关系；触点均为 Harness 内部实现面（非文档化 API）。
-> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.1-rc.3**（Windows x64，nightly 渠道，2026-10-26 逐触点审计）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 33/33）。
+> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.1-rc.5**（Windows x64，nightly 渠道；rc.3 于 2026-10-26 逐触点审计，rc.5 于 2026-10-30 复核）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 35/35）。
 
 > [!WARNING]
 > **删除即永久，无回收站**；脱敏只改写本地日志文件，**不能替代密钥轮换**。
@@ -94,7 +94,7 @@ POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? }
 node --test test/purge.test.mjs
 ```
 
-当前 **33/33**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
+当前 **35/35**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
 
 ## 已知限制（如实）
 

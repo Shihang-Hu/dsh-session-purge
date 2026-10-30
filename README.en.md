@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 > [!IMPORTANT]
 > Community third-party plugin, not affiliated with DeepSeek. All touchpoints are internal Harness implementation surfaces (undocumented API).
-> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.1-rc.3** (Windows x64, nightly channel; touchpoint audit 2026-10-26). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 33/33).
+> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.1-rc.5** (Windows x64, nightly channel; rc.3 touchpoint audit 2026-10-26, rc.5 re-check 2026-10-30). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 35/35).
 
 > [!WARNING]
 > **Deletion is permanent; there is no recycle bin.** Redaction only rewrites local log files and is **not a substitute for key rotation**.
@@ -94,7 +94,7 @@ Clone or download this repository (no npm dependencies), then **choose exactly o
 node --test test/purge.test.mjs
 ```
 
-Currently **33/33** (Node 24.21; runtimes without zstd skip the redaction cases).
+Currently **35/35** (Node 24.21; runtimes without zstd skip the redaction cases).
 
 ## Known limitations (stated as-is)
 

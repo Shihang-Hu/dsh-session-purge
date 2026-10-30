@@ -973,6 +973,43 @@ test('an unreadable workspace registry is reported, not treated as absent', asyn
   await assert.rejects(() => core.purgeWorkspace(ctx, HOME, 'ws1'), /工作区注册表无法解析/)
 })
 
+test('a foreign unit header blocks the file-level rewrite and the survivor is reported', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: {
+      unit: { name: 'someone-else', version: 1 },
+      global: { workspaceIds: [], archivedSessionIds: [LONE] },
+      tables: { workspaces: {} },
+    },
+  })
+  const ctx = makeCtx({ ...makeGraph([{ id: LONE, origin: 'human' }]) })
+
+  await assert.rejects(() => core.purgeTree(ctx, HOME, LONE), /工作区注册表拒绝改写.*someone-else/s)
+
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.deepEqual(registry.unit, { name: 'someone-else', version: 1 }, 'the foreign document must be left untouched')
+  assert.deepEqual(registry.global.archivedSessionIds, [LONE])
+})
+
+test('the rc.5 unit header survives file-level registry rewrites', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: {
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['ws1'], archivedSessionIds: [LONE] },
+      tables: { workspaces: { ws1: { sessionIds: [LONE] } } },
+    },
+  })
+  const ctx = makeCtx({ ...makeGraph([{ id: LONE, origin: 'human' }]) })
+
+  await core.purgeTree(ctx, HOME, LONE)
+
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.deepEqual(registry.unit, { name: 'workspace', version: 2 }, 'the stamp must round-trip untouched')
+  assert.deepEqual(registry.global.archivedSessionIds, [])
+  assert.deepEqual(registry.tables.workspaces.ws1.sessionIds, [])
+})
+
 test('purgeWorkspace rejects a malformed workspace id', async () => {
   const ctx = makeCtx({ ...makeGraph([]) })
   await assert.rejects(() => core.purgeWorkspace(ctx, HOME, ''), /workspaceId 不合法/)

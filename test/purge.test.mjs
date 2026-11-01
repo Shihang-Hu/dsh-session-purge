@@ -135,6 +135,15 @@ test('idVariants covers both spellings', () => {
   assert.equal(core.SESSION_ID_RE.test('session-../../etc'), false)
 })
 
+test('bridge-created session ids are accepted', () => {
+  const bridge = 'qqb-p-1234567-0123456789abcdef0123456789abcdef'
+  assert.equal(core.SESSION_ID_RE.test(bridge), true)
+  // The alternative pattern stays alphanumeric/hex, so traversal spellings still fail.
+  assert.equal(core.SESSION_ID_RE.test('qqb-p-1234567-0123456789abcdef0123456789abcde'), false) // 31 hex
+  assert.equal(core.SESSION_ID_RE.test('qqb-p-1234567-0123456789abcdef0123456789abcdef/..'), false)
+  assert.equal(core.SESSION_ID_RE.test('qqb-p-../../etc-0123456789abcdef0123456789abcdef'), false)
+})
+
 test('cascadeOrder walks the subagent tree breadth-first', async () => {
   const graph = makeGraph([
     { id: PARENT, origin: 'human', cwd: 'C:\\w' },

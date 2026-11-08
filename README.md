@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 社区第三方插件，与 DeepSeek 官方无隶属关系；触点均为 Harness 内部实现面（非文档化 API）。
-> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.1-rc.5**（Windows x64，nightly 渠道；rc.3 于 2026-10-26 逐触点审计，rc.5 于 2026-10-30 复核）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 36/36）。
+> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.2-rc.1**（Windows x64，nightly 渠道；0.2.1-rc.3/rc.5 于 2026-10-26/30 逐触点审计；0.2.2-rc.1 于 2026-11-09 复核宿主触点并实测 list 路由，删除/脱敏未在真机重跑）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 41/41）。
 
 > [!WARNING]
 > **删除即永久，无回收站**；脱敏只改写本地日志文件，**不能替代密钥轮换**。
@@ -18,7 +18,7 @@
 
 | 入口 | 位置 |
 |---|---|
-| 设置 → **会话清理** | 按工作区分组的会话列表：单会话删除（行内两段确认，Enter/Esc/10 秒撤防）、脱敏对话框、「删除工作区」（组头按钮，两段确认；成员运行中整体 409 拒绝；部分失败保留工作区并逐条报告）、搜索与"仅磁盘残留"筛选 |
+| 设置 → **会话清理** | 按工作区分组的会话列表：单会话删除（行内两段确认，Enter/Esc/10 秒撤防）、脱敏对话框、「删除工作区」（组头按钮，两段确认；成员运行中整体 409 拒绝；部分失败保留工作区并逐条报告）、搜索与"仅缓存记账"筛选；无 header 的纯磁盘目录也会列出（标记「仅磁盘日志」） |
 | 会话行"…"菜单 | 末尾「删除」项（官方槽位 `sidebar.workspaces.session.menu.item`），删除该行会话且不切换当前对话 |
 
 完成对话框报告释放字节、级联数与临时清扫摘要；对话框配色全部取宿主主题 token，跟随深浅色。
@@ -52,12 +52,16 @@ ctx.emit('api-session/removed')                  → 通知全部客户端刷新
 
 - 顺序：先删日志并验证删净，再清记账（半删会话不会掉出分组）；清理后逐层事后验证，未净显式报错，可直接重试；
 - 工作区记录另走 harness 的 `workspaceRegistry.delete()`（pendingMutation 协议，进程在删除过程中退出也能在下次启动收尾）；无该服务时降级路径写同样的标记，记录删除失败会回滚 order；
-- 护栏：会话 id 须匹配 `session-<uuid>`（或裸 uuid，不区分大小写）；**运行中拒绝（409）**；级联深度上限 `MAX_CASCADE_DEPTH = 8`，超出以 `cascadeTruncated: true` 显式报告；仅驻留不拒绝（先 `flush` 再清盘）；路径必须落在预期根内；**符号链接一律拒删**；全走 Node `fs`，不经 shell；
+- 护栏：会话 id 须匹配 `session-<uuid>`、裸 uuid 或桥接 id（不区分大小写）；**运行中拒绝（409）**；级联深度上限 `MAX_CASCADE_DEPTH = 8`，超出以 `cascadeTruncated: true` 显式报告；仅驻留不拒绝（先 `flush` 再清盘）；路径必须落在预期根内；**符号链接一律拒删**；全走 Node `fs`，不经 shell；
+- 布局护栏：删除/脱敏前用宿主 `sessionPersistence.stat().location` 交叉核对日志位置；位置落在 `$DSH_HOME/sessions/` 之外、或不在待删目录内时以 **503 拒绝**（fail-closed，避免"清掉账目/改写旧文件但真实日志还在"）；无该 API 的老宿主跳过这项检查；
+- 目标不存在时仍幂等：session 返回 `ok` 并在报告里带 `existed: false`（客户端提示"原本已不存在"）；workspace 的 `workspaceRecordDeleted` 为 `false`，不会谎称删掉了记录；
+- 纯磁盘残留：目录存在但 header 与投影行都缺失的会话也会出现在列表（`headered: false`，客户端标记「仅磁盘日志」），可单独删除；其子代理归属无法判断；
+- `live[]` 每项为 `{ sessionId, flushed, evicted, existed }`：`flushed: true && evicted: false` 表示宿主仍驻留该会话，客户端会提示彻底消失需重启；
 - TEMP 清扫按**内容归因**（目录内容提及会话 id 才删），受文件数/字节预算约束（超限报 `budgetHit`）；整棵级联只扫一次，各会话 `tempSweep[].dirs` 之和可能大于实际删除数（客户端摘要用去重合计 `tempSweepTotal`）。
 
 ## 脱敏语义
 
-逐帧解压 → 替换 → 逐帧重压缩，帧数与行结构不变；写回前落备份、写回后完整校验（内容一致 + 敏感值绝迹 + 帧数一致），失败自动回滚；**成功即删备份**。备份清理失败不回滚（避免把脱敏结果还原成明文），报告 `backupResidual`/`backupError`；单文件失败不中断其余文件。
+逐帧解压 → 替换 → 逐帧重压缩，帧数与行结构不变；写回前落备份、写回后完整校验（内容一致 + 敏感值绝迹 + 帧数一致），失败自动回滚；**成功即删备份**。备份清理失败不回滚（避免把脱敏结果还原成明文）；报告 `backupResidual`/`backupError`，完成对话框也会列出未删除的备份路径；单文件失败不中断其余文件。
 
 - `secrets`：完整值（6–512 字符，至多 64 项）→ 掩码 `[REDACTED:xxxx…lenNN]`（保留前 4 位与总长）；6–8 位短值会泄露大半，建议改用 `prefixes` 或直接轮换；
 - `prefixes`：已知前缀（4–32 位 `[A-Za-z0-9_-]`，至多 64 项），保留前缀、清除其后连续的字母/数字/`_`/`-`；
@@ -70,7 +74,7 @@ ctx.emit('api-session/removed')                  → 通知全部客户端刷新
 dsh-session-purge/
 ├── package.json          # 包清单：dsh.bundle.patch + dsh.client 声明
 ├── cordis.patch.yml      # bundle 层：向 profile 插入插件行
-├── lib/index.js          # 宿主半：删除/脱敏管线 + 三个同源 HTTP 路由
+├── lib/index.js          # 宿主半：删除/脱敏管线 + 四个同源 HTTP 路由
 ├── lib/client.js         # 客户端半：对话框 / 设置面板 / 侧栏行菜单
 └── test/purge.test.mjs   # 单元测试（假 ctx + 临时 DSH home）
 ```
@@ -78,8 +82,8 @@ dsh-session-purge/
 信任模型与宿主 `api-request-trust` 一致：授权主体必须为 loopback；`sec-fetch-site: cross-site` 一律拒绝；`Origin` 存在时必须等于该主体（桌面端经 `dsh-app://` 转发会剥离 Origin，故缺失即放行）。
 
 ```
-GET  /_dsh/session-purge/list             → { ok, sessions: [...] }（行含 workspaceId / workspace）
-POST /_dsh/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated }
+GET  /_dsh/session-purge/list             → { ok, sessions: [...] }（行含 workspaceId / workspace / headered）
+POST /_dsh/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
 POST /_dsh/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
 POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
 ```
@@ -94,16 +98,16 @@ POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? }
 node --test test/purge.test.mjs
 ```
 
-当前 **36/36**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
+当前 **41/41**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
 
 ## 已知限制（如实）
 
 - **无回收站**；不回收 `attachments` 引用计数；
 - TEMP 清扫是内容归因：从未提及会话 id 的输出会留存；
 - **删除当前正查看的会话宿主不拦**（无窗口守卫），其后界面表现未经端到端验证；
-- 子代理不在面板列出（清理依赖主会话级联）；对话页的子代理家族条目是父日志的派生投影，删除后界面残留到重建（磁盘与记账已净）；孤儿子代理需手工清理；
-- 驻留会话删除后：宿主仍持代理对象则保守跳过，幽灵行留到下次重启；
+- 子代理不在面板列出（清理依赖主会话级联）；对话页的子代理家族条目是父日志的派生投影，删除后界面残留到重建（磁盘与记账已净）；无 header 的孤儿子代理会以「仅磁盘日志」行列出，可单独删除，但无法按父级级联；
+- 驻留会话删除后：宿主仍持代理对象则保守跳过，客户端提示"宿主仍驻留该会话，彻底消失需重启客户端"；幽灵行留到下次重启；
 - Electron 渲染缓存可能短期保留已渲染内容（推断，未端到端验证）；
-- 端到端验证：0.2.0-rc.2 真机验证三个路由与两个入口；0.2.1-rc.3 起为逐触点静态审计（2026-10-26，未重复端到端）；脱敏路由与"运行中拒绝"等守卫尚未在真实数据上触发过。
+- 端到端验证：0.2.0-rc.2 真机验证三个路由与两个入口；0.2.1-rc.3 起为逐触点静态审计（2026-10-26）；0.2.2-rc.1 于 2026-11-09 复核宿主触点并实测 list 路由，删除/脱敏与"运行中拒绝"等守卫尚未在真实数据上重新触发过。
 
 变更历史见 [CHANGELOG.md](CHANGELOG.md)（自 0.3.4 起记录）。

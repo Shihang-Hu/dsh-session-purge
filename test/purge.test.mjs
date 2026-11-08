@@ -23,6 +23,7 @@ const CHILD_A = 'session-22222222-2222-2222-2222-222222222222'
 const CHILD_B = 'session-33333333-3333-3333-3333-333333333333'
 const GRANDCHILD = 'session-44444444-4444-4444-4444-444444444444'
 const LONE = 'session-55555555-5555-5555-5555-555555555555'
+const ORPHAN = 'session-66666666-6666-6666-6666-666666666666'
 
 const PROJECT = '--C-fake-project--'
 
@@ -138,6 +139,8 @@ test('idVariants covers both spellings', () => {
 test('bridge-created session ids are accepted', () => {
   const bridge = 'qqb-p-1234567-0123456789abcdef0123456789abcdef'
   assert.equal(core.SESSION_ID_RE.test(bridge), true)
+  // A bridge id has exactly one spelling: the `session-` prefix only belongs to UUIDs.
+  assert.deepEqual(core.idVariants(bridge), [bridge])
   // The alternative pattern stays alphanumeric/hex, so traversal spellings still fail.
   assert.equal(core.SESSION_ID_RE.test('qqb-p-1234567-0123456789abcdef0123456789abcde'), false) // 31 hex
   assert.equal(core.SESSION_ID_RE.test('qqb-p-1234567-0123456789abcdef0123456789abcdef/..'), false)
@@ -345,6 +348,84 @@ test('accounting leftovers after cleanup are surfaced, not swallowed', async () 
   await assert.rejects(() => core.purgeTree(ctx, HOME, LONE), /记账未清干净[\s\S]*投影缓存/)
   // the log itself is already gone — a retry only needs the accounting pass
   assert.equal(await exists(sessionDir(LONE)), false)
+})
+
+test('an unknown session is reported as not existing, not just deleted', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: { global: { archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } },
+  })
+  const ctx = makeCtx(makeGraph([]))
+
+  const report = await core.purgeTree(ctx, HOME, LONE)
+
+  assert.equal(report.existed, false)
+  assert.deepEqual(report.deleted, [LONE])
+  assert.equal(report.freedBytes, 0)
+  assert.equal(report.projRows, 0)
+})
+
+test('delete refuses a host-reported log outside the located session directories', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: { global: { archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } },
+  })
+  const graph = makeGraph([{ id: LONE, origin: 'human' }])
+  const sessionPersistence = {
+    ...graph.sessionPersistence,
+    stat: async () => ({ header: { id: LONE }, location: { kind: 'jsonl', path: join(HOME, 'moved', `${LONE}.zstd`) } }),
+  }
+  const ctx = makeCtx({ ...graph, sessionPersistence })
+
+  await assert.rejects(
+    () => core.purgeTree(ctx, HOME, LONE),
+    (error) => error.status === 503 && /布局可能已变化/.test(error.message),
+  )
+  // fail closed BEFORE touching anything
+  assert.equal(await exists(sessionDir(LONE)), true)
+  assert.equal(await exists(projFile(LONE)), true)
+  assert.deepEqual(ctx.emitted, [])
+})
+
+test('the layout guard accepts a host location inside the located directory', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: { global: { archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } },
+  })
+  const graph = makeGraph([{ id: LONE, origin: 'human' }])
+  const sessionPersistence = {
+    ...graph.sessionPersistence,
+    stat: async () => ({
+      header: { id: LONE },
+      location: { kind: 'jsonl', path: join(sessionDir(LONE), 'session.v4.jsonl.zstd') },
+    }),
+  }
+  const ctx = makeCtx({ ...graph, sessionPersistence })
+
+  const report = await core.purgeTree(ctx, HOME, LONE)
+
+  assert.equal(report.existed, true)
+  assert.deepEqual(report.deleted, [LONE])
+  assert.equal(await exists(sessionDir(LONE)), false)
+})
+
+test('redact refuses a host-reported log outside the located directory', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: { global: { archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } },
+  })
+  const graph = makeGraph([{ id: LONE, origin: 'human' }])
+  const sessionPersistence = {
+    ...graph.sessionPersistence,
+    stat: async () => ({ header: { id: LONE }, location: { kind: 'jsonl', path: join(HOME, 'moved', `${LONE}.zstd`) } }),
+  }
+  const ctx = makeCtx({ ...graph, sessionPersistence })
+
+  await assert.rejects(
+    () => core.redactSession(ctx, HOME, LONE, { secrets: ['whatever-value'] }),
+    (error) => error.status === 503 && /布局可能已变化/.test(error.message),
+  )
+  assert.equal(await exists(sessionDir(LONE)), true)
 })
 
 test('a cascade sweeps the temp tree exactly once for the whole tree', async () => {
@@ -733,7 +814,8 @@ test('a symbolic link in place of a session directory is refused', async (t) => 
 
 test('listSessions reports size, existence and archive flags', async () => {
   await buildHome({
-    sessions: [{ id: PARENT, bytes: 4096 }, { id: CHILD_A, dirs: false }],
+    // ORPHAN has a directory but no header and no projection row: disk-only residue.
+    sessions: [{ id: PARENT, bytes: 4096 }, { id: CHILD_A, dirs: false }, { id: ORPHAN, projcache: false }],
     workspaceState: { global: { archivedSessionIds: [CHILD_A] }, tables: { workspaces: { ws1: { sessionIds: [PARENT, CHILD_A] } } } },
   })
   const storageDomain = makeStorageDomain({
@@ -760,6 +842,14 @@ test('listSessions reports size, existence and archive flags', async () => {
   assert.equal(bySessionId.get(CHILD_A).exists, false)
   assert.equal(bySessionId.get(CHILD_A).archived, true)
   assert.equal(bySessionId.get(CHILD_A).parentSession, PARENT)
+  // Disk-only residue is listed (no header, no projection row) and badged by
+  // the client as "仅磁盘日志"; it stays deletable through the same route.
+  const orphan = bySessionId.get(ORPHAN)
+  assert.notEqual(orphan, undefined)
+  assert.equal(orphan.exists, true)
+  assert.equal(orphan.headered, false)
+  assert.equal(orphan.title, null)
+  assert.ok(orphan.sizeBytes >= 2048)
 })
 
 test('purgeWorkspace deletes every member session and the workspace record', async () => {
@@ -1017,6 +1107,26 @@ test('the rc.5 unit header survives file-level registry rewrites', async () => {
   assert.deepEqual(registry.unit, { name: 'workspace', version: 2 }, 'the stamp must round-trip untouched')
   assert.deepEqual(registry.global.archivedSessionIds, [])
   assert.deepEqual(registry.tables.workspaces.ws1.sessionIds, [])
+})
+
+test('purgeWorkspace reports an unknown workspace without claiming to delete it', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: {
+      global: { workspaceIds: ['ws1'], archivedSessionIds: [], pinnedSessionIds: [] },
+      tables: { workspaces: { ws1: { title: '保留', sessionIds: [] } } },
+    },
+  })
+  const ctx = makeCtx({ ...makeGraph([]) })
+
+  const report = await core.purgeWorkspace(ctx, HOME, 'missing-workspace')
+
+  assert.deepEqual(report.deleted, [])
+  assert.deepEqual(report.failures, [])
+  assert.equal(report.workspaceRecordDeleted, false)
+  const registry = JSON.parse(await readFile(join(HOME, 'storages', 'workspace.json'), 'utf8'))
+  assert.deepEqual(registry.global.workspaceIds, ['ws1'])
+  assert.notEqual(registry.tables.workspaces.ws1, undefined)
 })
 
 test('purgeWorkspace rejects a malformed workspace id', async () => {

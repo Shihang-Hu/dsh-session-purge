@@ -2,6 +2,55 @@
 
 > 本记录自 0.3.4 起维护；更早版本的变更未录入。
 
+## 0.5.12 — 加固：备份残留、删除串行化、未命中语义、布局守卫与纯磁盘残留
+
+2026-11-09：在 0.2.2-rc.1 上复核宿主触点（`sessions.store`/`flush`、
+`agents`、`storageDomain`、`workspaceRegistry`、`api-session/removed`、
+三个 slot 与 `workspace` 单元头），list 路由真机实测正常；本轮处理
+0.5.11 评审中的可完善项，并收口部分注释。
+
+### 修复/完善
+
+- **脱敏完成视图提示备份残留**：宿主已返回 `backupsResidual`/`backupError`，
+  对话框此前只汇总改写/失败数；现在以警告块列出未删除的备份路径，
+  避免用户误以为明文已清除。
+- **删除操作串行化**：面板键盘监听加入 busy 守卫并随 busy 状态重建；
+  任一行/工作区删除进行中时，所有行按钮与工作区删除按钮禁用，避免
+  Enter 连按或跨行并发触发第二个破坏性请求。
+- **"仅磁盘残留"筛选改名"仅缓存记账"**：筛选条件本是 `!exists`（有账目、
+  无磁盘日志）；文案与空状态保持一致，README 同步。
+- **纯磁盘残留可见**：`listSessions` 现在把 `sessions/` 下 id 合法、但既无
+  header 也无投影行的目录也列入（行新增 `headered: false`），客户端标记
+  「仅磁盘日志」；这类残留可直接删除，但其子代理归属无法判断。
+- **未命中目标如实报告**：session 删除响应新增 `existed`；目标完全不存在时
+  为 `false`，客户端提示"原本已不存在"。workspace 的
+  `workspaceRecordDeleted` 改为按实际删除层数计算，不再把未知工作区报成
+  已删除。
+- **布局 fail-closed 守卫**：删除与脱敏前用宿主 `sessionPersistence.stat().location`
+  核对日志位置；落在 `$DSH_HOME/sessions/` 之外或不在待删目录内时以 503
+  拒绝，避免"清掉账目/改写旧文件但真实日志还在"的静默成功。无该 API 的
+  老宿主跳过。
+- **驻留提示**：删除报告 `live[]` 中的 `flushed && !evicted` 现在会以
+  "宿主仍驻留该会话，彻底消失需重启客户端"呈现。
+- **桥接 id 不再生成 `session-` 变体**：只有 UUID 才做两种拼写互转。
+
+### 清理
+
+- **注释收口**：`index.js` 的 temp 前缀沿革、0.5.6 二次遍历、两次事故日期，
+  `client.js` 的 0.2.3/0.2.13、0.5.3–0.5.5 版本叙事，均改为结论式说明；
+  CHANGELOG 保留历史。
+- **会计引用收集共享**：`registryReferences()` 同时服务
+  `verifyAccountingClean` 与新的存在性检查。
+
+### 测试
+
+- 新增 5 例：未知 session 的 `existed:false`；未知 workspace 的
+  `workspaceRecordDeleted:false` 且注册表不变；宿主日志位置在预期根外时
+  删除/脱敏以 503 拒绝且不动文件；位置在待删目录内时正常删除。桥接 id
+  用例补 `idVariants` 断言。
+- 宿主回归 **41/41**；`package.json` 升版 0.5.12；README 兼容基线更新为
+  0.2.2-rc.1（仅复核触点 + list 实测；删除/脱敏未真机重跑）。
+
 ## 0.5.11 — 修复：接受 qq-bridge 自建的会话 id
 
 2026-11-01：qq-bridge 在 QQ 聊天工作区自建的会话 id 形如

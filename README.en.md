@@ -21,7 +21,7 @@ Two operations for DeepSeek Harness session data:
 | Settings → **Session cleanup** | Session list grouped by workspace, all groups collapsed by default (search opens them); single-session delete (two clicks in the same fixed slot, Esc/10 s auto-disarm), redaction dialog, "Delete workspace" (two clicks in a fixed group-header slot; any member running → 409 for the whole request; partial failure keeps the workspace and reports `failures[]`), search and "cache accounting only" filter; disk-only directories without a header are listed too (badge "disk log only") |
 | Session row "…" menu | "Permanently delete session" item (icon + separator; running sessions open the dialog, which locks and explains; official slot `sidebar.workspaces.session.menu.item`); deletes the session without switching the current conversation |
 
-The panel starts with a "Session cleanup" title, a one-line description and a divider. State colors: red = delete/armed, blue = running, amber = cache/disk residue, gray = archived/resident/metadata. The completion dialog reports freed bytes, cascade counts and the temp-sweep summary; all dialog colors come from host theme tokens and follow light/dark themes.
+The panel starts with a "Session cleanup" title, a one-line description and a divider. State colors: red = delete/armed, blue = running, amber = cache/disk residue, gray = archived/resident/metadata. Each session row has a dedicated "Copy ID" button; the delete button stays fixed at the far right. The completion dialog reports freed bytes, cascade counts and the temp-sweep summary; all dialog colors come from host theme tokens and follow light/dark themes.
 
 ## Page layout reset
 

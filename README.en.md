@@ -19,9 +19,8 @@ Two operations for DeepSeek Harness session data:
 | Entry | Location |
 |---|---|
 | Settings → **Session cleanup** | Session list grouped by workspace, all groups collapsed by default (search opens them); single-session delete (two clicks in the same fixed slot, Esc/10 s auto-disarm), redaction dialog, "Delete workspace" (two clicks in a fixed group-header slot; any member running → 409 for the whole request; partial failure keeps the workspace and reports `failures[]`), search and "cache accounting only" filter; disk-only directories without a header are listed too (badge "disk log only") |
-| Session row "…" menu | "Permanently delete session" item (icon + separator; running sessions open the dialog, which locks and explains; official slot `sidebar.workspaces.session.menu.item`); deletes the session without switching the current conversation |
 
-The panel starts with a "Session cleanup" title, a one-line description and a divider. State colors: red = delete/armed, blue = running, amber = cache/disk residue, gray = archived/resident/metadata. Each session row has a dedicated "Copy ID" button (it shows "Copied" in place for a moment), and the delete button stays fixed at the far right. The completion dialog reports freed bytes, cascade counts and the temp-sweep summary; all dialog colors come from host theme tokens and follow light/dark themes.
+The panel starts with a "Session cleanup" title, a one-line description and a divider. State colors: red = delete/armed, blue = running, amber = cache/disk residue, gray = archived/resident/metadata. Each session row has a dedicated "Copy ID" button (it shows "Copied" in place for a moment), and the delete button stays fixed at the far right. Delete results appear as a notice above the list (freed bytes, cascade count, temp-sweep summary, resident hint); the redaction completion view lists frame counts and replacements. The redaction dialog colors come from host theme tokens and follow light/dark themes.
 
 ## Page layout reset
 
@@ -75,7 +74,7 @@ dsh-session-purge/
 ├── package.json          # manifest: dsh.bundle.patch + dsh.client declarations
 ├── cordis.patch.yml      # bundle layer: inserts the plugin row into a profile
 ├── lib/index.js          # host half: delete/redact pipelines + four same-origin HTTP routes
-├── lib/client.js         # client half: dialogs / settings panel / sidebar row menu
+├── lib/client.js         # client half: settings panel / redaction dialog
 └── test/purge.test.mjs   # unit tests (fake ctx + temp DSH home)
 ```
 

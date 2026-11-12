@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 > [!IMPORTANT]
 > Community third-party plugin, not affiliated with DeepSeek. All touchpoints are internal Harness implementation surfaces (undocumented API).
-> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.2-rc.2** (Windows x64, nightly channel; 0.2.1-rc.3/rc.5 touchpoint audits 2026-10-26/30; 0.2.2-rc.2 `sessionQuery`/`connection.fetch` touchpoints re-checked 2026-11-12, delete/redact not re-run end-to-end). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 42/42).
+> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.2-rc.2** (Windows x64, nightly channel; 0.2.1-rc.3/rc.5 touchpoint audits 2026-10-26/30; 0.2.2-rc.2 `sessionQuery`/`connection.fetch` touchpoints re-checked 2026-11-12, delete/redact not re-run end-to-end). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 48/48).
 
 > [!WARNING]
 > **Deletion is permanent; there is no recycle bin.** Redaction only rewrites local log files and is **not a substitute for key rotation**.
@@ -18,7 +18,7 @@ Two operations for DeepSeek Harness session data:
 
 | Entry | Location |
 |---|---|
-| Settings → **Session cleanup** | Session list grouped by workspace, all groups collapsed by default (search opens them); single-session delete (two clicks in the same fixed slot, Esc/10 s auto-disarm), redaction dialog, "Delete workspace" (two clicks in a fixed group-header slot; any member running → 409 for the whole request; partial failure keeps the workspace and reports `failures[]`), search and "cache accounting only" filter; disk-only directories without a header are listed too (badge "disk log only") |
+| Settings → **Session cleanup** | Session list grouped by workspace, all groups collapsed by default (search opens them); single-session delete (two clicks in the same fixed slot, Esc/10 s auto-disarm), redaction dialog, "Delete workspace" (two clicks in a fixed group-header slot; any member running → 409 for the whole request; partial failure keeps the workspace and reports `failures[]`), search and "cache accounting only" filter; disk-only directories without a header are listed too (badge "disk log only"). Cache accounting left by an earlier delete is finished automatically the next time the panel opens, so a second manual delete is no longer needed |
 
 The panel starts with a "Session cleanup" title, a one-line description and a divider. State colors: red = delete/armed, blue = running, amber = cache/disk residue, gray = archived/resident/metadata. Each session row has a dedicated "Copy ID" button (it shows "Copied" in place for a moment), and the delete button stays fixed at the far right. Delete results appear as a notice above the list (freed bytes, cascade count, temp-sweep summary, resident hint); the redaction completion view lists frame counts and replacements. The redaction dialog colors come from host theme tokens and follow light/dark themes.
 
@@ -56,6 +56,7 @@ ctx.emit('api-session/removed')                  → notify all clients to refre
 - Layout guard: before deleting or redacting, the host's `sessionPersistence.stat().location` is cross-checked; a log outside `$DSH_HOME/sessions/`, or not inside a directory about to be removed, is refused with **503** (fail closed instead of cleaning accounting or rewriting a stale file while the real log survives); hosts without that API skip the check;
 - Missing targets stay idempotent: a session returns `ok` with `existed: false` (the client says it was already gone); a workspace reports `workspaceRecordDeleted: false` instead of claiming a record was removed;
 - Disk-only residue: a directory that outlived both its header and its projection row is listed too (`headered: false`, badged "disk log only") and can be deleted on its own; its subagent parentage is unknown;
+- **Deferred residue is reaped automatically**: every successful purge (cascade and workspace members included) records the id in `$DSH_HOME/storages/dsh-session-purge/tombstones.json`. The first `/list` of the next plugin instance re-runs the delete pipeline for those ids — after the shutdown checkpoint that used to recreate the cache row. `deletedAt < instance start` is the process fence: an id deleted by the current process is never reaped by itself, avoiding a race with the checkpoint that follows. The tombstone file is removed once everything is clean (entries written by the current process stay until the next start). **Residue from deletes made before 0.5.23 has no tombstone and still needs one manual cleanup**; later deletes are automatic;
 - `live[]` entries are `{ sessionId, flushed, evicted, existed }`: `flushed: true && evicted: false` means the host still holds the session, and the client says a restart is needed for it to disappear;
 - The TEMP sweep is **content-attributed** (only directories whose content mentions the id are deleted), bounded by a file-count/byte budget (`budgetHit`); one sweep per cascade, so per-session `tempSweep[].dirs` can sum to more than actually deleted (the client summary uses the deduplicated `tempSweepTotal`).
 
@@ -82,7 +83,7 @@ dsh-session-purge/
 The four routes register on `ctx.connection.fetch`, so DSH applies its Host/Origin fence and browser/API Peer authentication, and only an owner Peer is admitted. The plugin keeps no loopback/Origin check of its own.
 
 ```
-GET  /api/session-purge/list             → { ok, sessions: [...] } (rows carry workspaceId / workspace / headered)
+GET  /api/session-purge/list             → { ok, sessions: [...], housekeeping } (rows carry workspaceId / workspace / headered; housekeeping reports cleaned / removed / remaining / problems; removed counts residues actually cleared)
 POST /api/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
 POST /api/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
 POST /api/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
@@ -92,7 +93,7 @@ POST /api/session-purge/redact           → { sessionId, secrets?, prefixes? } 
 
 Clone or download this repository (no npm dependencies), then **choose exactly one**: add `dsh-session-purge` to the profile's bundles list, or `insert` a row `name: 'dsh-session-purge'` into the profile's `cordis.patch.yml`. Doing both loads the plugin twice.
 
-> Since 0.5.22 the host routes register on `ctx.connection.fetch`. Restart the client once after updating an installed copy; HMR reloads the plugin row/client bundle but does not replace an already-registered old `/_dsh/...` route.
+> Since 0.5.22 the host routes register on `ctx.connection.fetch`; 0.5.23's deferred-residue reaping also lives in the host half. Restart the client once after updating an installed copy; HMR reloads the plugin row/client bundle but does not replace an already-registered old `/_dsh/...` route or rebuild the plugin instance (the reaping process fence depends on a new instance).
 
 ## Tests
 
@@ -100,7 +101,7 @@ Clone or download this repository (no npm dependencies), then **choose exactly o
 node --test test/purge.test.mjs
 ```
 
-Currently **42/42** (Node 24.21; runtimes without zstd skip the redaction cases, but the DSH 0.2.2 baseline requires Node ≥ 24.9).
+Currently **48/48** (Node 24.21; runtimes without zstd skip the redaction cases, but the DSH 0.2.2 baseline requires Node ≥ 24.9).
 
 ## Known limitations (stated as-is)
 
@@ -108,7 +109,7 @@ Currently **42/42** (Node 24.21; runtimes without zstd skip the redaction cases,
 - The TEMP sweep is content-attributed: outputs that never mention the session id survive;
 - **Deleting the currently viewed session is not blocked host-side** (no window guard); its subsequent UI behavior is unverified end-to-end;
 - Subagents are not listed in the panel (cleanup relies on the main-session cascade); the conversation page's subagent family entries are a derived projection of the parent log and linger until rebuilt (disk and accounting are already clean); header-less orphan subagents are listed as "disk log only" rows and can be deleted individually, but cannot cascade by parent;
-- After deleting a resident session: if the host still holds an agent object, it is conservatively skipped; the client says the host still holds it and a restart is needed for it to disappear; the ghost row stays until restart;
+- After deleting a resident session: if the host still holds an agent object, it is conservatively skipped; the client says the host still holds it and a restart is needed for it to disappear; the ghost row stays until restart, and the first panel load after that restart reaps it automatically (provided the successful delete recorded a tombstone);
 - Electron render cache may retain recently rendered content briefly (inferred, not verified end-to-end);
 - End-to-end status: the three routes and two entries were verified on a real DSH 0.2.0-rc.2; since 0.2.1-rc.3 compatibility rests on static touchpoint audits (2026-10-26); on 0.2.2-rc.1 (2026-11-09) the host touchpoints were re-checked and the list route exercised; on 0.2.2-rc.2 (2026-11-12) the `sessionQuery`/`connection.fetch` touchpoints were re-checked, and after a restart an authenticated `/api/session-purge/list` returned 200 (9 rows) while an invalid delete body returned 400; delete/redact and guards like "running refusal" were not re-triggered against real data.
 

@@ -855,6 +855,149 @@ test('listSessions prefers the sessionQuery corpus and its live flag', async () 
   assert.equal(bySessionId.get(CHILD_A).parentSession, PARENT)
 })
 
+test('a completed purge is replayed on the next start to clear the shutdown cache row', async () => {
+  await buildHome({
+    sessions: [{ id: LONE }],
+    workspaceState: { global: { archivedSessionIds: [LONE] }, tables: { workspaces: { ws1: { sessionIds: [LONE] } } } },
+  })
+  const graph = makeGraph([{ id: LONE, origin: 'human' }])
+  const report = await core.purgeTree(makeCtx(graph), HOME, LONE)
+  assert.deepEqual(report.deleted, [LONE])
+  const first = await core.readTombstones(HOME)
+  assert.deepEqual(first.entries.map((entry) => entry.id), [LONE])
+
+  // The host's shutdown checkpoint runs after the purge and recreates exactly
+  // the row the user used to delete by hand after restarting.
+  await mkdir(dirname(projFile(LONE)), { recursive: true })
+  await writeFile(projFile(LONE), JSON.stringify({ version: 7, record: {} }))
+  const registryPath = join(HOME, 'storages', 'workspace.json')
+  const registry = JSON.parse(await readFile(registryPath, 'utf8'))
+  registry.tables.workspaces.ws1 = { ...registry.tables.workspaces.ws1, sessionIds: [LONE] }
+  registry.global.archivedSessionIds = [LONE]
+  await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`)
+
+  const reopened = makeCtx(makeGraph([{ id: LONE, origin: 'human', live: false }]))
+  const housekeeping = await core.reapTombstones(reopened, HOME, Date.now() + 1000)
+
+  assert.equal(housekeeping.cleaned, 1)
+  assert.equal(housekeeping.removed, 1)
+  assert.equal(housekeeping.remaining, 0)
+  assert.equal(await exists(projFile(LONE)), false)
+  const after = JSON.parse(await readFile(registryPath, 'utf8'))
+  assert.deepEqual(after.tables.workspaces.ws1.sessionIds, [])
+  assert.deepEqual(after.global.archivedSessionIds, [])
+  assert.equal(await exists(core.tombstonesPath(HOME)), false)
+})
+
+test('a tombstone written by the current process is not reaped', async () => {
+  await buildHome({
+    sessions: [{ id: LONE, dirs: false }],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+  })
+  await core.rememberTombstones(HOME, [LONE])
+  const ctx = makeCtx(makeGraph([{ id: LONE, origin: 'human', live: false }]))
+
+  const sameProcess = await core.reapTombstones(ctx, HOME, Date.now() - 1000)
+  assert.equal(sameProcess.checked, 0)
+  assert.equal(await exists(projFile(LONE)), true)
+  assert.equal((await core.readTombstones(HOME)).entries.length, 1)
+
+  const nextProcess = await core.reapTombstones(ctx, HOME, Date.now() + 1000)
+  assert.equal(nextProcess.cleaned, 1)
+  assert.equal(await exists(projFile(LONE)), false)
+  assert.equal(await exists(core.tombstonesPath(HOME)), false)
+})
+
+test('reaping clears both the storage-domain row and its backing file', async () => {
+  await buildHome({
+    sessions: [{ id: LONE, dirs: false }],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+  })
+  await core.writeTombstones(HOME, [{ id: LONE, deletedAt: 1 }])
+  const storageDomain = makeStorageDomain({
+    projRows: [LONE],
+    workspaces: { ws1: { sessionIds: [LONE] } },
+  })
+  const ctx = makeCtx({
+    sessionQuery: { listSessions: async () => [] },
+    storageDomain,
+  })
+
+  const housekeeping = await core.reapTombstones(ctx, HOME, Date.now() + 1000)
+
+  assert.equal(housekeeping.cleaned, 1)
+  assert.equal(housekeeping.removed, 1)
+  assert.equal(storageDomain.projTable.has(LONE), false)
+  assert.deepEqual(storageDomain.wsTable.get('ws1').sessionIds, [])
+  assert.equal(await exists(projFile(LONE)), false)
+  assert.equal(await exists(core.tombstonesPath(HOME)), false)
+})
+
+test('a tombstone with no residue is forgotten without reporting a removal', async () => {
+  await buildHome({
+    sessions: [],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+  })
+  await core.writeTombstones(HOME, [{ id: LONE, deletedAt: 1 }])
+  const ctx = makeCtx(makeGraph([]))
+
+  const housekeeping = await core.reapTombstones(ctx, HOME, Date.now() + 1000)
+
+  assert.equal(housekeeping.cleaned, 1)
+  assert.equal(housekeeping.removed, 0)
+  assert.equal(housekeeping.remaining, 0)
+  assert.equal(await exists(core.tombstonesPath(HOME)), false)
+})
+
+test('a tombstone survives while its agent is still running', async () => {
+  await buildHome({
+    sessions: [{ id: LONE, dirs: false }],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+  })
+  await core.rememberTombstones(HOME, [LONE])
+  const ctx = makeCtx({
+    sessions: { get: () => ({}) },
+    agents: { get: () => ({ status: 'running' }) },
+  })
+
+  const housekeeping = await core.reapTombstones(ctx, HOME, Date.now() + 1000)
+  assert.equal(housekeeping.cleaned, 0)
+  assert.equal(housekeeping.remaining, 1)
+  assert.equal(await exists(projFile(LONE)), true)
+  assert.equal((await core.readTombstones(HOME)).entries.length, 1)
+})
+
+test('the list route reaps prior tombstones before returning', async () => {
+  await buildHome({
+    sessions: [{ id: LONE, dirs: false }],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+  })
+  // deletedAt in the past is what a previous process would have written.
+  await core.writeTombstones(HOME, [{ id: LONE, deletedAt: 1 }])
+  const routes = []
+  const connection = { fetch: { register: (route) => { routes.push(route); return () => {} } } }
+  const scope = { connection, effect: (fn) => { fn() } }
+  const ctx = {
+    get: (name) => {
+      if (name === 'dshHomePath') return () => HOME
+      if (name === 'sessions') return { get: () => undefined }
+      return undefined
+    },
+    inject: (names, callback) => callback(scope),
+  }
+
+  applyPlugin(ctx)
+  const list = routes.find((route) => route.path === '/api/session-purge/list')
+  const response = await list.fetch(new Request('http://127.0.0.1/api/session-purge/list'))
+  const payload = await response.json()
+
+  assert.equal(response.status, 200)
+  assert.equal(payload.housekeeping.cleaned, 1)
+  assert.equal(payload.housekeeping.removed, 1)
+  assert.deepEqual(payload.sessions, [])
+  assert.equal(await exists(projFile(LONE)), false)
+})
+
 test('apply registers the four authenticated connection Fetch routes', async () => {
   await buildHome({ sessions: [], workspaceState: { global: {}, tables: { workspaces: {} } } })
   const routes = []

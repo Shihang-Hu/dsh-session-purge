@@ -12,7 +12,7 @@ import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { __internals as core } from '../lib/index.js'
+import { __internals as core, apply as applyPlugin } from '../lib/index.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const workspace = resolve(here, '..', '..')
@@ -474,26 +474,6 @@ test('a cascade sweeps the temp tree exactly once for the whole tree', async () 
   }
 })
 
-test('sameOriginReq: loopback authority + cross-site refusal + Origin agreement', () => {
-  const req = (headers) => ({ headers })
-  // The Desktop client's forwarder strips Origin and Sec-Fetch-Site: accepted.
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387' })), true)
-  assert.equal(core.sameOriginReq(req({ host: 'localhost:19387' })), true)
-  assert.equal(core.sameOriginReq(req({ host: '[::1]:19387' })), true)
-  // A browser's same-origin request carries both and must agree.
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387', 'sec-fetch-site': 'same-origin' })), true)
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', 'sec-fetch-site': 'same-origin' })), true)
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', 'sec-fetch-site': 'none' })), true)
-  // Cross-site markers and mismatching Origins are refused.
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', 'sec-fetch-site': 'cross-site' })), false)
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', origin: 'https://evil.example' })), false)
-  assert.equal(core.sameOriginReq(req({ host: '127.0.0.1:19387', origin: 'not a url' })), false)
-  // Only loopback authorities are trusted.
-  assert.equal(core.sameOriginReq(req({ host: 'evil.example' })), false)
-  assert.equal(core.sameOriginReq(req({ host: 'evil.example', origin: 'http://evil.example' })), false)
-  assert.equal(core.sameOriginReq(req({})), false)
-})
-
 test('sweepTempOutputs removes only dsh-* dirs whose content mentions the session', async () => {
   const tmp = join(HOME, 'tmp')
   await mkdir(join(tmp, 'dsh-subprocess-AAA'), { recursive: true })
@@ -606,8 +586,7 @@ test('redactSession refuses running sessions and bad input; residents are allowe
   await assert.rejects(() => core.redactSession(idle, HOME, LONE, { secrets: ['short'] }), /长度/)
   await assert.rejects(() => core.redactSession(idle, HOME, LONE, {}), /至少提供一项/)
   await assert.rejects(() => core.redactSession(idle, HOME, LONE, { prefixes: ['ab'] }), /前缀/)
-  // a session with no log is a 404, not a runtime-feature 501: the existence
-  // check runs before the zstd feature detection
+  // a session with no log is a 404, independent of the zstd runtime
   await assert.rejects(() => core.redactSession(idle, HOME, CHILD_B, { secrets: ['whatever-value'] }), /未找到/)
 })
 
@@ -641,7 +620,7 @@ test('a redaction whose backup cannot be removed keeps the redacted log', async 
   }
 
   try {
-    const entry = await core.redactLogFile(logFile, { secrets: [secret], prefixes: [] }, zlib, io)
+    const entry = await core.redactLogFile(logFile, { secrets: [secret], prefixes: [] }, io)
     assert.equal(entry.changed, true)
     assert.equal(entry.backupResidual, backup)
     assert.match(entry.backupError, /staged cleanup failure/)
@@ -688,7 +667,7 @@ test('a failed write still rolls back from the backup', async (t) => {
 
   try {
     await assert.rejects(
-      () => core.redactLogFile(logFile, { secrets: [secret], prefixes: [] }, zlib, io),
+      () => core.redactLogFile(logFile, { secrets: [secret], prefixes: [] }, io),
       /已回滚原文件[\s\S]*ENOSPC/,
     )
     assert.deepEqual(await readFile(logFile), original, 'a failed write must leave the original log in place')
@@ -717,7 +696,7 @@ test('redactSession reads each log file at most once', async (t) => {
   const logFile = join(dir, 'session.v4.jsonl.zstd')
   await writeFile(logFile, Buffer.concat(lines.map((line) => zlib.zstdCompressSync(Buffer.from(`${line}\n`, 'utf8')))))
 
-  const entry = await core.redactLogFile(logFile, { secrets: [secret], prefixes: ['abcd1234'] }, zlib)
+  const entry = await core.redactLogFile(logFile, { secrets: [secret], prefixes: ['abcd1234'] })
   assert.equal(entry.frames, 4)
   // both spans live in different frames; a whole-file pre-scan would have seen
   // them together, so a count of two proves the per-frame rewrite only ran once
@@ -850,6 +829,76 @@ test('listSessions reports size, existence and archive flags', async () => {
   assert.equal(orphan.headered, false)
   assert.equal(orphan.title, null)
   assert.ok(orphan.sizeBytes >= 2048)
+})
+
+test('listSessions prefers the sessionQuery corpus and its live flag', async () => {
+  await buildHome({
+    sessions: [{ id: PARENT }, { id: CHILD_A }],
+    workspaceState: { global: {}, tables: { workspaces: {} } },
+    projcache: false,
+  })
+  const ctx = makeCtx({
+    sessionQuery: {
+      listSessions: async () => [
+        { header: { id: PARENT, cwd: 'C:\\w', createdAt: 2 }, live: true },
+        { header: { id: CHILD_A, parentSession: PARENT, createdAt: 1 }, live: false },
+      ],
+    },
+  })
+  const rows = await core.listSessions(ctx, HOME)
+  const bySessionId = new Map(rows.map((row) => [row.id, row]))
+  assert.equal(bySessionId.get(PARENT).open, true)
+  assert.equal(bySessionId.get(PARENT).headered, true)
+  assert.equal(bySessionId.get(PARENT).exists, true)
+  assert.equal(bySessionId.get(CHILD_A).open, false)
+  assert.equal(bySessionId.get(CHILD_A).headered, true)
+  assert.equal(bySessionId.get(CHILD_A).parentSession, PARENT)
+})
+
+test('apply registers the four authenticated connection Fetch routes', async () => {
+  await buildHome({ sessions: [], workspaceState: { global: {}, tables: { workspaces: {} } } })
+  const routes = []
+  const connection = {
+    fetch: {
+      register: (route) => {
+        routes.push(route)
+        return () => {}
+      },
+    },
+  }
+  const scope = { connection, effect: (fn) => { fn() } }
+  const ctx = {
+    get: (name) => (name === 'dshHomePath' ? () => HOME : undefined),
+    inject: (names, callback) => {
+      assert.deepEqual(names, ['connection'])
+      callback(scope)
+    },
+  }
+
+  applyPlugin(ctx)
+
+  assert.deepEqual(routes.map((route) => route.path).sort(), [
+    '/api/session-purge/delete',
+    '/api/session-purge/delete-workspace',
+    '/api/session-purge/list',
+    '/api/session-purge/redact',
+  ])
+  const list = routes.find((route) => route.path === '/api/session-purge/list')
+  assert.deepEqual(list.methods, ['GET'])
+  const response = await list.fetch(new Request('http://127.0.0.1/api/session-purge/list'))
+  assert.equal(response.status, 200)
+  const payload = await response.json()
+  assert.equal(payload.ok, true)
+  assert.deepEqual(payload.sessions, [])
+
+  const remove = routes.find((route) => route.path === '/api/session-purge/delete')
+  const refused = await remove.fetch(new Request('http://127.0.0.1/api/session-purge/delete', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  }))
+  assert.equal(refused.status, 400)
+  assert.equal((await refused.json()).reason, 'sessionId 必填')
 })
 
 test('purgeWorkspace deletes every member session and the workspace record', async () => {

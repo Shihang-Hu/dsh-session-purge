@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 > [!IMPORTANT]
 > Community third-party plugin, not affiliated with DeepSeek. All touchpoints are internal Harness implementation surfaces (undocumented API).
-> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.2-rc.1** (Windows x64, nightly channel; 0.2.1-rc.3/rc.5 touchpoint audits 2026-10-26/30; 0.2.2-rc.1 host touchpoints re-checked and the list route exercised 2026-11-09, delete/redact not re-run end-to-end). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 41/41).
+> Compatibility baseline: `@deepseek-ai/dsh-desktop` **0.2.2-rc.2** (Windows x64, nightly channel; 0.2.1-rc.3/rc.5 touchpoint audits 2026-10-26/30; 0.2.2-rc.2 `sessionQuery`/`connection.fetch` touchpoints re-checked 2026-11-12, delete/redact not re-run end-to-end). Nightly updates may **break compatibility silently** — after upgrading DSH, run `node --test test/purge.test.mjs` (expect 42/42).
 
 > [!WARNING]
 > **Deletion is permanent; there is no recycle bin.** Redaction only rewrites local log files and is **not a substitute for key rotation**.
@@ -40,6 +40,7 @@ Clears the layout whitelist only (prefix matching covers per-session keys); keyb
 ## Delete semantics
 
 ```
+ctx.get('sessionQuery').listSessions()           → unified live-preferred corpus for sessions/residency/subagent graph (fallback: public store + persistence)
 ctx.get('sessions')                              → live session: flush (resident object evicted when no proxy holds it)
 ctx.get('storageDomain') → 'session_projcache'   → projection cache rows (domain + file, two layers)
 ctx.get('storageDomain') → 'workspace'           → workspace accounting + archived/pinned sets (domain + file, two layers)
@@ -65,7 +66,7 @@ Frame-by-frame decompress → replace → recompress; frame count and line struc
 - `secrets`: full values (6–512 chars, ≤64 items) → masked as `[REDACTED:xxxx…lenNN]` (first 4 chars + total length kept); 6–8 char values leak most of themselves — prefer `prefixes` or key rotation;
 - `prefixes`: known prefixes (4–32 chars of `[A-Za-z0-9_-]`, ≤64 items); prefix kept, the trailing `[A-Za-z0-9_-]` run cleared;
 - Only "running" is refused (409); do not redact the session you are **currently viewing** (UI state unverified);
-- Requires the zlib zstd API of Node ≥ 23.8 (feature-detected; without it the route returns 501, everything else works).
+- Requires the zlib zstd API of Node ≥ 24.9 (DSH 0.2.2 baseline; redaction no longer has a runtime fallback).
 
 ## Layout and interface
 
@@ -73,23 +74,25 @@ Frame-by-frame decompress → replace → recompress; frame count and line struc
 dsh-session-purge/
 ├── package.json          # manifest: dsh.bundle.patch + dsh.client declarations
 ├── cordis.patch.yml      # bundle layer: inserts the plugin row into a profile
-├── lib/index.js          # host half: delete/redact pipelines + four same-origin HTTP routes
+├── lib/index.js          # host half: delete/redact pipelines + four authenticated Fetch routes
 ├── lib/client.js         # client half: settings panel / redaction dialog
 └── test/purge.test.mjs   # unit tests (fake ctx + temp DSH home)
 ```
 
-Trust model identical to the host's `api-request-trust`: principal must be loopback; `sec-fetch-site: cross-site` always refused; when `Origin` is present it must equal the principal (the desktop client forwards via `dsh-app://`, which strips `Origin`, hence missing-Origin passes).
+The four routes register on `ctx.connection.fetch`, so DSH applies its Host/Origin fence and browser/API Peer authentication, and only an owner Peer is admitted. The plugin keeps no loopback/Origin check of its own.
 
 ```
-GET  /_dsh/session-purge/list             → { ok, sessions: [...] } (rows carry workspaceId / workspace / headered)
-POST /_dsh/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
-POST /_dsh/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
-POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
+GET  /api/session-purge/list             → { ok, sessions: [...] } (rows carry workspaceId / workspace / headered)
+POST /api/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
+POST /api/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
+POST /api/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
 ```
 
 ## Install (modifies your DSH profile)
 
-Clone or download this repository (no npm dependencies), then **choose exactly one**: add `dsh-session-purge` to the profile's bundles list, or `insert` a row `name: 'dsh-session-purge'` into the profile's `cordis.patch.yml`. Doing both loads the plugin twice. On desktop no restart is needed (the `dsh-hmr` hot-loads the plugin row).
+Clone or download this repository (no npm dependencies), then **choose exactly one**: add `dsh-session-purge` to the profile's bundles list, or `insert` a row `name: 'dsh-session-purge'` into the profile's `cordis.patch.yml`. Doing both loads the plugin twice.
+
+> Since 0.5.22 the host routes register on `ctx.connection.fetch`. Restart the client once after updating an installed copy; HMR reloads the plugin row/client bundle but does not replace an already-registered old `/_dsh/...` route.
 
 ## Tests
 
@@ -97,7 +100,7 @@ Clone or download this repository (no npm dependencies), then **choose exactly o
 node --test test/purge.test.mjs
 ```
 
-Currently **41/41** (Node 24.21; runtimes without zstd skip the redaction cases).
+Currently **42/42** (Node 24.21; runtimes without zstd skip the redaction cases, but the DSH 0.2.2 baseline requires Node ≥ 24.9).
 
 ## Known limitations (stated as-is)
 
@@ -107,6 +110,6 @@ Currently **41/41** (Node 24.21; runtimes without zstd skip the redaction cases)
 - Subagents are not listed in the panel (cleanup relies on the main-session cascade); the conversation page's subagent family entries are a derived projection of the parent log and linger until rebuilt (disk and accounting are already clean); header-less orphan subagents are listed as "disk log only" rows and can be deleted individually, but cannot cascade by parent;
 - After deleting a resident session: if the host still holds an agent object, it is conservatively skipped; the client says the host still holds it and a restart is needed for it to disappear; the ghost row stays until restart;
 - Electron render cache may retain recently rendered content briefly (inferred, not verified end-to-end);
-- End-to-end status: the three routes and two entries were verified on a real DSH 0.2.0-rc.2; since 0.2.1-rc.3 compatibility rests on the static touchpoint audit (2026-10-26); on 0.2.2-rc.1 (2026-11-09) the host touchpoints were re-checked and the list route exercised, but delete/redact and guards like "running refusal" were not re-triggered against real data.
+- End-to-end status: the three routes and two entries were verified on a real DSH 0.2.0-rc.2; since 0.2.1-rc.3 compatibility rests on static touchpoint audits (2026-10-26); on 0.2.2-rc.1 (2026-11-09) the host touchpoints were re-checked and the list route exercised; on 0.2.2-rc.2 (2026-11-12) the `sessionQuery`/`connection.fetch` touchpoints were re-checked, and after a restart an authenticated `/api/session-purge/list` returned 200 (9 rows) while an invalid delete body returned 400; delete/redact and guards like "running refusal" were not re-triggered against real data.
 
 Change history: [CHANGELOG.md](CHANGELOG.md) (from 0.3.4).

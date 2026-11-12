@@ -2,6 +2,30 @@
 
 > 本记录自 0.3.4 起维护；更早版本的变更未录入。
 
+## 0.5.22 — 优化：认证 Fetch 路由、sessionQuery 枚举、Node 24 基线
+
+2026-11-12：面向 DSH `0.2.2-rc.2` 的瘦身；删除/脱敏的数据管线不变。
+
+### 宿主
+
+- 四个路由从 `ctx.webServer` 的 `/_dsh/...` 原始 HTTP 路由迁到 `ctx.connection.fetch` 的 `/api/session-purge/*`。DSH 统一执行 Host/Origin 校验、浏览器/API Peer 认证，并且只允许 owner Peer 调用；插件删除自带的 `sameOriginReq`、loopback 判断、请求体读取和响应写入逻辑。
+- 路由注册形态变化不会由 HMR 替换：已安装副本更新后需重启客户端一次，旧 `/_dsh/...` 路由才会消失。
+- 会话枚举与子代理图优先使用 `ctx.sessionQuery.listSessions()`（与 native Session list 同一 live-preferred corpus），`live` 直接作为面板的「驻留」标记；不再读 `sessions.store`，也去掉重复的 `sessionPersistence.list()` 合并。无该服务的 profile 仍回退到公开的 `sessions.list()` + `sessionPersistence.list()`。
+- 按 DSH 0.2.2 的 Node 24.9 基线静态引入 `node:zlib` 的 zstd API，删除 `loadZstd()`、运行时 501 分支和 `dshNotes`；`engines.node` 改为 `>=24.9`。
+- 新增 `apply()` 的 Fetch 路由注册测试和 `sessionQuery` 列表测试；删除已失效的 `sameOriginReq` 测试。
+
+### 客户端
+
+- 列表/删除/脱敏 URL 改为 `/api/session-purge/*`，随浏览器/桌面传输自动携带认证。
+- 删除脱敏对话框对客户端 `sessions` store 的标题/运行状态回查；打开事件已携带行上的 `title`/`running`，宿主 409 仍是运行状态的最终兜底。
+- `shell.overlay` 保留：脱敏请求最长 10 分钟，切换设置页时对话框需要继续存活。
+
+### 测试
+
+- 宿主回归 **42/42**；`node --check` 通过。
+- 迁移后的 `/api/session-purge/*` 认证路由由单测覆盖；重启客户端后已带认证 cookie 实测 list 200（9 条）与无效 delete body 400。
+- `package.json` 升版 0.5.22。
+
 ## 0.5.21 — 移除：左侧会话菜单的永久删除入口
 
 2026-11-12：只改客户端入口与文档，不动宿主删除管线。

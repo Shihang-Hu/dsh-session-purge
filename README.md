@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > 社区第三方插件，与 DeepSeek 官方无隶属关系；触点均为 Harness 内部实现面（非文档化 API）。
-> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.2-rc.1**（Windows x64，nightly 渠道；0.2.1-rc.3/rc.5 于 2026-10-26/30 逐触点审计；0.2.2-rc.1 于 2026-11-09 复核宿主触点并实测 list 路由，删除/脱敏未在真机重跑）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 41/41）。
+> 兼容基线：`@deepseek-ai/dsh-desktop` **0.2.2-rc.2**（Windows x64，nightly 渠道；0.2.1-rc.3/rc.5 于 2026-10-26/30 逐触点审计；0.2.2-rc.2 于 2026-11-12 复核 `sessionQuery`/`connection.fetch` 触点，删除/脱敏未在真机重跑）。nightly 更新可能**静默破坏兼容**——升级 DSH 后先运行 `node --test test/purge.test.mjs`（应 42/42）。
 
 > [!WARNING]
 > **删除即永久，无回收站**；脱敏只改写本地日志文件，**不能替代密钥轮换**。
@@ -40,6 +40,7 @@ location.reload();
 ## 删除语义
 
 ```
+ctx.get('sessionQuery').listSessions()           → 会话/驻留/子代理图的统一 live-preferred 枚举（无该服务时回退公开 store + persistence）
 ctx.get('sessions')                              → 活会话：flush（驻留对象在无代理持有时再驱逐）
 ctx.get('storageDomain') → 'session_projcache'   → 投影缓存行（域 + 文件双层）
 ctx.get('storageDomain') → 'workspace'           → 工作区记账 + 归档/置顶集合（域 + 文件双层）
@@ -65,7 +66,7 @@ ctx.emit('api-session/removed')                  → 通知全部客户端刷新
 - `secrets`：完整值（6–512 字符，至多 64 项）→ 掩码 `[REDACTED:xxxx…lenNN]`（保留前 4 位与总长）；6–8 位短值会泄露大半，建议改用 `prefixes` 或直接轮换；
 - `prefixes`：已知前缀（4–32 位 `[A-Za-z0-9_-]`，至多 64 项），保留前缀、清除其后连续的字母/数字/`_`/`-`；
 - 仅"运行中"拒绝（409）；请勿对**当前正查看**的会话执行（界面状态未验证）；
-- 需 Node ≥ 23.8 的 zstd API（运行时检测；不满足时该路由 501，其余功能不受影响）。
+- 依赖 Node ≥ 24.9 的 zstd API（DSH 0.2.2 基线；脱敏不再做运行时降级）。
 
 ## 目录结构与接口
 
@@ -73,23 +74,25 @@ ctx.emit('api-session/removed')                  → 通知全部客户端刷新
 dsh-session-purge/
 ├── package.json          # 包清单：dsh.bundle.patch + dsh.client 声明
 ├── cordis.patch.yml      # bundle 层：向 profile 插入插件行
-├── lib/index.js          # 宿主半：删除/脱敏管线 + 四个同源 HTTP 路由
+├── lib/index.js          # 宿主半：删除/脱敏管线 + 四个认证 Fetch 路由
 ├── lib/client.js         # 客户端半：设置面板 / 脱敏对话框
 └── test/purge.test.mjs   # 单元测试（假 ctx + 临时 DSH home）
 ```
 
-信任模型与宿主 `api-request-trust` 一致：授权主体必须为 loopback；`sec-fetch-site: cross-site` 一律拒绝；`Origin` 存在时必须等于该主体（桌面端经 `dsh-app://` 转发会剥离 Origin，故缺失即放行）。
+四个路由注册在 `ctx.connection.fetch`，由 DSH 统一执行 Host/Origin 校验、浏览器/API Peer 认证，并且只允许 owner Peer 调用；插件不再维护自己的 loopback/Origin 判断。
 
 ```
-GET  /_dsh/session-purge/list             → { ok, sessions: [...] }（行含 workspaceId / workspace / headered）
-POST /_dsh/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
-POST /_dsh/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
-POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
+GET  /api/session-purge/list             → { ok, sessions: [...] }（行含 workspaceId / workspace / headered）
+POST /api/session-purge/delete           → { sessionId } → { ok, deleted[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, live[], descendants[], cascadeTruncated, existed }
+POST /api/session-purge/delete-workspace → { workspaceId } → { ok, workspaceId, workspaceTitle, deleted[], failures[], freedBytes, projRows, wsRefs, tempSweep[], tempSweepTotal, workspaceRecordDeleted, cascadeTruncated }
+POST /api/session-purge/redact           → { sessionId, secrets?, prefixes? } → { ok, files[], totalReplacements, backupsResidual, failures }
 ```
 
 ## 安装（会修改 DSH profile）
 
-克隆或下载本仓库（无 npm 依赖），然后**二选一**：把 `dsh-session-purge` 放入 profile 的 bundles 列表，或在目标 profile 的 `cordis.patch.yml` 中 `insert` 一行 `name: 'dsh-session-purge'`。二者都做会加载两次。桌面版实测无需重启（`dsh-hmr` 热加载插件行）。
+克隆或下载本仓库（无 npm 依赖），然后**二选一**：把 `dsh-session-purge` 放入 profile 的 bundles 列表，或在目标 profile 的 `cordis.patch.yml` 中 `insert` 一行 `name: 'dsh-session-purge'`。二者都做会加载两次。
+
+> 0.5.22 起宿主路由注册在 `ctx.connection.fetch`。更新已安装副本后需要重启客户端一次；HMR 只会重载插件行/客户端 bundle，不会替换已经注册的旧 `/_dsh/...` 路由。
 
 ## 测试
 
@@ -97,7 +100,7 @@ POST /_dsh/session-purge/redact           → { sessionId, secrets?, prefixes? }
 node --test test/purge.test.mjs
 ```
 
-当前 **41/41**（Node 24.21；无 zstd 的运行时跳过脱敏用例）。
+当前 **42/42**（Node 24.21；脱敏用例在无 zstd 的运行时跳过，但 DSH 0.2.2 基线要求 Node ≥ 24.9）。
 
 ## 已知限制（如实）
 
@@ -107,6 +110,6 @@ node --test test/purge.test.mjs
 - 子代理不在面板列出（清理依赖主会话级联）；对话页的子代理家族条目是父日志的派生投影，删除后界面残留到重建（磁盘与记账已净）；无 header 的孤儿子代理会以「仅磁盘日志」行列出，可单独删除，但无法按父级级联；
 - 驻留会话删除后：宿主仍持代理对象则保守跳过，客户端提示"宿主仍驻留该会话，彻底消失需重启客户端"；幽灵行留到下次重启；
 - Electron 渲染缓存可能短期保留已渲染内容（推断，未端到端验证）；
-- 端到端验证：0.2.0-rc.2 真机验证三个路由与两个入口；0.2.1-rc.3 起为逐触点静态审计（2026-10-26）；0.2.2-rc.1 于 2026-11-09 复核宿主触点并实测 list 路由，删除/脱敏与"运行中拒绝"等守卫尚未在真实数据上重新触发过。
+- 端到端验证：0.2.0-rc.2 真机验证三个路由与两个入口；0.2.1-rc.3 起为逐触点静态审计（2026-10-26）；0.2.2-rc.1 于 2026-11-09 复核宿主触点并实测 list 路由；0.2.2-rc.2 于 2026-11-12 复核 `sessionQuery`/`connection.fetch` 触点，重启后带认证 cookie 实测 `/api/session-purge/list` 200（9 条）与无效 delete body 400；删除/脱敏与"运行中拒绝"等守卫未在真实数据上重新触发。
 
 变更历史见 [CHANGELOG.md](CHANGELOG.md)（自 0.3.4 起记录）。
